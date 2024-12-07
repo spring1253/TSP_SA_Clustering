@@ -6,6 +6,9 @@ import numpy as np
 from collections import defaultdict
 from sklearn.cluster import KMeans, SpectralClustering, AgglomerativeClustering
 import copy
+import time
+import csv
+import subprocess
 
 matplotlib.use('Agg')  # Set the non-interactive backend
 
@@ -70,7 +73,7 @@ def read_data(data_path, num_repeat, shuffle=True):
             optimums.append(optimum)
 
         return test_cases, optimums
-
+    
 def simulated_annealing_tsp(cities, isCenter, initial_temp=5000, cooling_rate=0.99, max_iterations=1500, begin_with_random=True):
     """
     Simulated Annealing algorithm for solving TSP.
@@ -85,6 +88,10 @@ def simulated_annealing_tsp(cities, isCenter, initial_temp=5000, cooling_rate=0.
     Returns:
         tuple: Best route (list of Vertex objects) and its associated distance (float).
     """
+
+    # Handle case with only one city
+    if len(cities) == 1:
+        return cities, 0.0  # The cost is 0 if there's only one city
 
     # Helper functions
     def get_neighbors(route):
@@ -289,7 +296,6 @@ def greedy_clustering(vertices, num_clusters):
     
     return cluster_assignments, centroids
 
-
 # --- K-Means Clustering Implementation ---
 def kmeans_clustering(vertices, num_clusters):
     data = prepare_data(vertices)
@@ -353,6 +359,8 @@ def run_clustering(vertices, num_clusters, method='kmeans', show_plot=False, **k
         plt.title(f"{method.capitalize()} Clustering Visualization")
         plt.xlabel("X-axis")
         plt.ylabel("Y-axis")
+        plt.xlim(0, 1)
+        plt.ylim(0, 1)
         plt.grid()
         plt.savefig("2.png")
         plt.close()
@@ -427,6 +435,8 @@ def run_inner_outer(vertices, cluster_assignments, selected_vertices, show_plot,
     path_data = path_data[1:]
 
     if show_plot:
+        plt.xlim(0, 1)
+        plt.ylim(0, 1)
         plt.savefig("3.png")
         plt.close()
 
@@ -500,6 +510,9 @@ def plot_final_path(vertices, cluster_assignments, selected_vertices, actual_pat
             start = actual_path[i]
             end = actual_path[(i + 1) % len(actual_path)]
             plt.plot([start.x, end.x], [start.y, end.y], color='black', linestyle='-', linewidth=2)
+
+        plt.xlim(0, 1)
+        plt.ylim(0, 1)
             
         plt.savefig("4.png")
         plt.close()
@@ -525,6 +538,9 @@ def compare_solution(vertices, cluster_assignments, selected_vertices, actual_pa
             start = optimum[i]
             end = optimum[(i + 1) % len(optimum)]
             plt.plot([start.x, end.x], [start.y, end.y], color='black', linestyle='-', linewidth=2)
+
+        plt.xlim(0, 1)
+        plt.ylim(0, 1)
             
         plt.savefig("5.png")
         plt.close()
@@ -536,29 +552,57 @@ def compare_solution(vertices, cluster_assignments, selected_vertices, actual_pa
 
 ####################### USE ONLY HERE #######################
 
-def run_simulation(num_vertices, num_clusters, num_test_cases, clustering_method):
+def run_simulation(num_vertices, num_clusters, num_test_cases, clustering_method, csv_path = './simulation_results'):
     data_path, num_clusters = set_parameters(num_vertices, num_clusters)
     test_cases, optimums = read_data(data_path, num_test_cases)
 
-    for i in range(num_test_cases):
-        test_case, optimum = test_cases[i], optimums[i]
+    with open(f'{csv_path}/{num_vertices}_{num_clusters}_{num_test_cases}_{clustering_method}.csv', 'w') as file:
+        writer = csv.writer(file)
+        writer.writerow(['OPT', 'SOL', 'Rate', 'Time'])
 
-        vertices, cluster_assignments, selected_vertices = run_clustering(
-            test_case, 
-            num_clusters=num_clusters, 
-            method=clustering_method, 
-            show_plot=True
-        )
+        for i in range(num_test_cases):
+            test_case, optimum = test_cases[i], optimums[i]
 
-        path_data = run_inner_outer(vertices, cluster_assignments, selected_vertices, True, True)
-        actual_path = run_deleteEdge(path_data)
-        dist_sol = plot_final_path(vertices, cluster_assignments, selected_vertices, actual_path, True)
-        print("Distance:", dist_sol)
-        dist_opt = compare_solution(vertices, cluster_assignments, selected_vertices, actual_path, optimum, True)
-        print('OPT =', dist_opt)
-        print('SOL =', dist_sol)
-        print('Rate =', dist_sol/dist_opt)
+            start_time = time.perf_counter()
 
-run_simulation(30, 'default', 3, 'hierarchical')
+            vertices, cluster_assignments, selected_vertices = run_clustering(
+                test_case, 
+                num_clusters=num_clusters, 
+                method=clustering_method, 
+                show_plot=True
+            )
+
+            path_data = run_inner_outer(vertices, cluster_assignments, selected_vertices, False, False)
+            actual_path = run_deleteEdge(path_data)
+
+            end_time = time.perf_counter()
+
+            dist_sol = plot_final_path(vertices, cluster_assignments, selected_vertices, actual_path, False)
+            dist_opt = compare_solution(vertices, cluster_assignments, selected_vertices, actual_path, optimum, False)
+
+            writer.writerow([dist_opt, dist_sol, dist_sol/dist_opt, end_time-start_time])
+
+if __name__ == '__main__':
+    for num_vertices in [1000]:
+        for num_clusters in [16, 22, 32, 44, 64]: # 22=sqrt(1000/2), 32=sqrt(1000)
+            for num_test_cases in [10]: # I want to run 10 cases on each setting. Any opinion on this number?
+                for clustering_method in ['greedy', 'kmeans', 'hierarchical', 'spectral']:
+                    run_simulation(num_vertices, num_clusters, num_test_cases, clustering_method)
+            commands = [
+                ['git', 'add', 'simulation_results/*'],
+                ['git', 'commit', '-m', f'auto commit: {num_vertices} vertices, {num_clusters} clusters'],
+                ['git', 'push']
+            ]
+            # Execute each command sequentially
+            for command in commands:
+                result = subprocess.run(command, capture_output=True, text=True)
+                
+                # Check if the command was successful
+                if result.returncode != 0:
+                    print(f"Error executing command: {' '.join(command)}")
+                    print("Error:", result.stderr)
+                else:
+                    print(f"Successfully executed: {' '.join(command)}")
+                    print("Output:", result.stdout)
 
 ############################ END ############################
