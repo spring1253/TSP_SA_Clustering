@@ -299,7 +299,7 @@ def greedy_clustering(vertices, num_clusters):
 # --- K-Means Clustering Implementation ---
 def kmeans_clustering(vertices, num_clusters):
     data = prepare_data(vertices)
-    kmeans = KMeans(n_clusters=num_clusters, random_state=42)
+    kmeans = KMeans(n_clusters=num_clusters)
     kmeans.fit(data)
     cluster_assignments, selected_vertices = assign_results(vertices, kmeans.labels_, kmeans.cluster_centers_)
     return cluster_assignments, selected_vertices
@@ -315,7 +315,7 @@ def hierarchical_clustering(vertices, num_clusters):
 # --- Spectral Clustering Implementation --- 
 def spectral_clustering(vertices, num_clusters):
     data = prepare_data(vertices)
-    spectral = SpectralClustering(n_clusters=num_clusters, affinity='nearest_neighbors', random_state=42)
+    spectral = SpectralClustering(n_clusters=num_clusters, affinity='nearest_neighbors')
     labels = spectral.fit_predict(data)
     cluster_assignments, selected_vertices = assign_results(vertices, labels)  # Now this computes centroids
     return cluster_assignments, selected_vertices
@@ -588,6 +588,7 @@ if __name__ == '__main__':
             for num_test_cases in [10]: # I want to run 10 cases on each setting. Any opinion on this number?
                 for clustering_method in ['greedy', 'kmeans', 'hierarchical', 'spectral']:
                     run_simulation(num_vertices, num_clusters, num_test_cases, clustering_method)
+                    print(f'Finished: {num_vertices}, {num_clusters}, {num_test_cases}, {clustering_method}')
             commands = [
                 ['git', 'add', 'simulation_results/*'],
                 ['git', 'commit', '-m', f'auto commit: {num_vertices} vertices, {num_clusters} clusters'],
