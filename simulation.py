@@ -572,27 +572,30 @@ def run_simulation(num_vertices, num_clusters, num_test_cases, clustering_method
                 show_plot=True
             )
 
-            path_data = run_inner_outer(vertices, cluster_assignments, selected_vertices, False, False)
+            path_data = run_inner_outer(vertices, cluster_assignments, selected_vertices, True, True)
             actual_path = run_deleteEdge(path_data)
 
             end_time = time.perf_counter()
 
-            dist_sol = plot_final_path(vertices, cluster_assignments, selected_vertices, actual_path, False)
-            dist_opt = compare_solution(vertices, cluster_assignments, selected_vertices, actual_path, optimum, False)
+            dist_sol = plot_final_path(vertices, cluster_assignments, selected_vertices, actual_path, True)
+            dist_opt = compare_solution(vertices, cluster_assignments, selected_vertices, actual_path, optimum, True)
 
             writer.writerow([dist_opt, dist_sol, dist_sol/dist_opt, end_time-start_time])
+            print(dist_opt, dist_sol, dist_sol/dist_opt, end_time-start_time)
+            with open(f'{csv_path}/actual_path.txt', 'w') as file2:
+                csv.writer(file2).writerow([actual_path])
 
 if __name__ == '__main__':
-    for num_vertices in [1000]:
-        for num_clusters in [16, 22, 32, 44, 64]: # 22=sqrt(1000/2), 32=sqrt(1000)
-            for num_test_cases in [10]: # I want to run 10 cases on each setting. Any opinion on this number?
-                for clustering_method in ['greedy', 'kmeans', 'hierarchical', 'spectral']:
-                    run_simulation(num_vertices, num_clusters, num_test_cases, clustering_method)
+    for num_vertices in [10000]:
+        for num_clusters in [int(num_vertices**0.5)]: # 22=sqrt(1000/2), 32=sqrt(1000)
+            for num_test_cases in [1]:
+                for clustering_method in ['hierarchical']:
+                    run_simulation(num_vertices, num_clusters, num_test_cases, clustering_method, './practice_simulation_results')
                     print(f'Finished: {num_vertices}, {num_clusters}, {num_test_cases}, {clustering_method}')
             commands = [
-                ['git', 'add', 'simulation_results/*'],
-                ['git', 'commit', '-m', f'auto commit: {num_vertices} vertices, {num_clusters} clusters'],
-                ['git', 'push']
+                # ['git', 'add', 'simulation_results/*'],
+                # ['git', 'commit', '-m', f'auto commit: {num_vertices} vertices, {num_clusters} clusters'],
+                # ['git', 'push']
             ]
             # Execute each command sequentially
             for command in commands:
