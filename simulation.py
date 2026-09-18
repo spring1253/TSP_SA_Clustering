@@ -1,612 +1,393 @@
-import random
-import math
-import matplotlib
-import matplotlib.pyplot as plt
-import numpy as np
-from collections import defaultdict
-from sklearn.cluster import KMeans, SpectralClustering, AgglomerativeClustering
-import copy
-import time
+"""Reproducible clustering + simulated annealing experiments for Euclidean TSP.
+
+Every method receives the same seeded instance; plotting and file I/O are outside
+the measured region; iterations are a real proposal budget; 2-opt deltas are O(1);
+and ratios are reported only against an exact solution under the same metric.
+"""
+
+from __future__ import annotations
+
+import argparse
 import csv
-import subprocess
+import math
+import random
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, Sequence
 
-matplotlib.use('Agg')  # Set the non-interactive backend
+import numpy as np
+from sklearn.cluster import AgglomerativeClustering, KMeans, SpectralClustering
 
+
+@dataclass(frozen=True)
 class Vertex:
-    def __init__(self, x, y):
-        self.x = x
-        self.y = y
-    
-    def __str__(self):
-        return f"({self.x}, {self.y})"
-    
-    def __repr__(self):
-        return f"({self.x}, {self.y})"
-    
-    def points(self):
-        return [self.x, self.y]
-    
-    def __lt__(self, other):
-        return self.x < other.x if self.x != other.x else self.y < other.y
-    
-    def distance_to(self, other):
-        return ((self.x - other.x) ** 2 + (self.y - other.y) ** 2) ** 0.5
-    
-    def __hash__(self):
-        return hash((self.x, self.y))
-    
-    def __eq__(self, other):
-        if not isinstance(other, Vertex):
-            return False
-        return (self.x, self.y) == (other.x, other.y)
-    
-def calculate_tour_cost(solution, isCenter):
-    if isCenter:
-        solution = [vertex[1] for vertex in solution]
-    cost = 0
-    for i in range(len(solution) - 1):
-        cost += solution[i].distance_to(solution[i + 1])
-    cost += solution[-1].distance_to(solution[0])  # Complete the loop
-    return cost
+    id: int
+    x: float
+    y: float
 
-def read_data(data_path, num_repeat, shuffle=True):
-    with open(data_path, 'r') as file:
-        data = [line.strip() for line in file.readlines()]
+    def distance_to(self, other: "Vertex") -> float:
+        return math.hypot(self.x - other.x, self.y - other.y)
 
-        if shuffle:
-            random.shuffle(data)
-        
-        test_cases, optimums = [], []
 
-        for i in range(num_repeat):
-            line = data[i].split()
-            line, answer = line[:line.index('output')], line[line.index('output')+1:]
-            test_case = []
-            for j in range(0, len(line), 2):
-                test_case.append(Vertex(float(line[j]), float(line[j+1])))
-            test_cases.append(test_case)
-        
-            optimum = []
-            for ind in answer:
-                ind = int(ind) - 1
-                optimum.append(test_case[ind])
-            optimums.append(optimum)
+def generate_uniform_instance(num_vertices: int, seed: int) -> list[Vertex]:
+    rng = np.random.default_rng(seed)
+    points = rng.random((num_vertices, 2))
+    return [Vertex(i, float(x), float(y)) for i, (x, y) in enumerate(points)]
 
-        return test_cases, optimums
-    
-def simulated_annealing_tsp(cities, isCenter, initial_temp=5000, cooling_rate=0.99, max_iterations=1500, begin_with_random=True):
+
+def read_data(data_path: str | Path, instance_indices: Sequence[int]) -> list[tuple[list[Vertex], list[int]]]:
+    """Read explicitly selected instances without implicit random shuffling.
+
+    The returned tour is a reference tour, not a claimed Euclidean optimum. The
+    source generator used Concorde's GEO norm while this project evaluates plain
+    Euclidean distance.
     """
-    Simulated Annealing algorithm for solving TSP.
-    
-    Parameters:
-        cities (list): List of Vertex objects representing the cities.
-        initial_temp (float): Initial temperature for the annealing process.
-        cooling_rate (float): Rate at which the temperature decreases.
-        max_iterations (int): Maximum number of iterations for the algorithm.
-        begin_with_random (bool): Whether to start with a random route or the given order.
-
-    Returns:
-        tuple: Best route (list of Vertex objects) and its associated distance (float).
-    """
-
-    # Handle case with only one city
-    if len(cities) == 1:
-        return cities, 0.0  # The cost is 0 if there's only one city
-
-    # Helper functions
-    def get_neighbors(route):
-        """Generate a neighboring route using one of four operations."""
-        neighbor = copy.deepcopy(route)
-        operation = random.choice([inverse, insert, swap, swap_routes])
-        operation(neighbor)
-        return neighbor
-
-    def inverse(route):
-        """Reverse the order of cities between two random indices."""
-        i, j = sorted(random.sample(range(len(route)), 2))
-        route[i:j] = route[i:j][::-1]
-
-    def insert(route):
-        """Remove a random city and insert it before another city."""
-        node = route.pop(random.randint(0, len(route) - 1))
-        route.insert(random.randint(0, len(route) - 1), node)
-
-    def swap(route):
-        """Swap two random cities."""
-        i, j = random.sample(range(len(route)), 2)
-        route[i], route[j] = route[j], route[i]
-
-    def swap_routes(route):
-        """Move a subroute to a new position in the route."""
-        i, j = sorted(random.sample(range(len(route)), 2))
-        subroute = route[i:j]
-        del route[i:j]
-        insert_pos = random.randint(0, len(route) - 1)
-        route[insert_pos:insert_pos] = subroute
-
-    # Initialize solution
-    current_solution = random.sample(cities, len(cities)) if begin_with_random else cities[:]
-    current_cost = calculate_tour_cost(current_solution, isCenter)
-    best_solution, best_cost = current_solution[:], current_cost
-
-    temp = initial_temp
-    same_solution = 0
-    same_cost_diff = 0
-
-    while same_solution < max_iterations and same_cost_diff < 150000:
-        # Generate a neighboring solution
-        neighbor = get_neighbors(current_solution)
-        neighbor_cost = calculate_tour_cost(neighbor, isCenter)
-
-        cost_diff = neighbor_cost - current_cost
-        if cost_diff < 0:  # Better solution
-            current_solution, current_cost = neighbor, neighbor_cost
-            same_solution = 0
-            same_cost_diff = 0
-        elif cost_diff == 0:  # Same cost, accept neighbor
-            current_solution = neighbor
-            same_solution = 0
-            same_cost_diff += 1
-        else:  # Worse solution, accept with probability
-            if random.random() < math.exp(-cost_diff / temp):
-                current_solution, current_cost = neighbor, neighbor_cost
-                same_solution = 0
-                same_cost_diff = 0
-            else:
-                same_solution += 1
-                same_cost_diff += 1
-
-        # Update the best solution found
-        if current_cost < best_cost:
-            best_solution, best_cost = current_solution[:], current_cost
-
-        # Decrease temperature
-        temp *= cooling_rate
-
-    return best_solution, best_cost
-
-def plot_tsp_solution(cities, sa_solution, reference_solution, sa_cost, reference_cost):
-    """
-    Plots the cities and their respective TSP tours, showing the result of the simulated annealing solution and the reference solution.
-    
-    :param cities: List of Vertex objects (cities in the TSP problem).
-    :param sa_solution: List of Vertex objects representing the solution found by simulated annealing.
-    :param reference_solution: List of Vertex objects representing the optimal reference solution.
-    :param sa_cost: Cost of the solution found by simulated annealing.
-    :param reference_cost: Cost of the reference solution.
-    """
-    
-    # Create a figure and axis for plotting
-    plt.figure(figsize=(10, 8))
-    
-    # Plot the cities
-    x_vals = [city.x for city in cities]
-    y_vals = [city.y for city in cities]
-    plt.scatter(x_vals, y_vals, color='blue', label="Cities", zorder=5)
-
-    # Plot the Simulated Annealing solution
-    sa_x = [city.x for city in sa_solution] + [sa_solution[0].x]
-    sa_y = [city.y for city in sa_solution] + [sa_solution[0].y]
-    plt.plot(sa_x, sa_y, color='green', linewidth=2, label=f"SA Tour (Cost: {sa_cost:.2f})", zorder=4)
-
-    # Plot the reference solution
-    ref_x = [city.x for city in reference_solution] + [reference_solution[0].x]
-    ref_y = [city.y for city in reference_solution] + [reference_solution[0].y]
-    plt.plot(ref_x, ref_y, color='red', linewidth=3, linestyle='--', label=f"Reference Tour (Cost: {reference_cost:.2f})", zorder=3)
-    
-    # Annotate the cities
-    # for i, city in enumerate(cities):
-    #     plt.text(city.x + 0.01, city.y + 0.01, f"{i+1}", fontsize=9, ha='center', color='black')
-
-    # Add labels and title
-    plt.title(f"TSP Solution Comparison", fontsize=16)
-    plt.xlabel("X Coordinate", fontsize=14)
-    plt.ylabel("Y Coordinate", fontsize=14)
-    
-    # Add a legend
-    plt.legend(loc='upper left', fontsize=12)
-
-    # Set the limits to the [0, 1] range for both axes
-    plt.xlim(0, 1)
-    plt.ylim(0, 1)
-    
-    # Show grid
-    plt.grid(True)
-
-    # Show the plot
-    plt.savefig("1.png")
-    plt.close()
-
-def set_parameters(num_vertices, num_clusters):
-    data_path = f'./tsp-data/tsp{num_vertices}_test_concorde.txt'
-    if not isinstance(num_clusters, int):
-        num_clusters = round((num_vertices * 0.5) ** 0.5)
-    return data_path, num_clusters
-
-# --- Utility Functions for Clustering ---
-def prepare_data(vertices):
-    """
-    Converts a list of Vertex objects to a 2D NumPy array suitable for clustering.
-    """
-    return np.array([[v.x, v.y] for v in vertices])
-
-def assign_clusters(vertices, selected_vertices):
-    """
-    Assigns each vertex to the nearest selected vertex (greedy approach).
-    """
-    assignments = {}
-    for v in vertices:
-        closest_vertex = min(selected_vertices, key=lambda sv: v.distance_to(sv))
-        assignments[v] = closest_vertex
-    return assignments
-
-def plot_clusters(vertices, cluster_assignments, selected_vertices):
-    """
-    Visualizes the clusters with unique colors for each. 
-    The centroids are marked with a special marker.
-    """
-    # Generate a color map based on the number of clusters
-    colors = plt.cm.tab10 if len(set(cluster_assignments.values())) <= 10 else plt.cm.tab20
-    clusters = defaultdict(list)
-
-    # Group vertices by cluster ID
-    for vertex, cluster in cluster_assignments.items():
-        clusters[cluster].append(vertex)
-
-    # Plot the points for each cluster
-    for idx, (cluster_id, points) in enumerate(clusters.items()):
-        xs = [p.x for p in points]
-        ys = [p.y for p in points]
-        plt.scatter(xs, ys, color=colors(idx / len(clusters)), label=f"Cluster {cluster_id}")
-
-    # Plot the centroids with a special marker (e.g., 'X' marker)
-    for cluster_id, centroid in selected_vertices.items():
-        plt.scatter(centroid.x, centroid.y, color='black', marker='X', s=100, label=f"Centroid {cluster_id}")
-
-# --- Greedy Clustering Implementation ---
-def greedy_clustering(vertices, num_clusters):
-    selected_vertices = []
-    pick = random.sample(vertices, 1)[0]
-    selected_vertices.append(pick)
-    
-    while len(selected_vertices) < num_clusters:
-        max_distance = -np.inf
-        furthest_vertex = None
-        for v in vertices:
-            min_distance = min(v.distance_to(p) for p in selected_vertices)
-            if min_distance > max_distance:
-                max_distance = min_distance
-                furthest_vertex = v
-        selected_vertices.append(furthest_vertex)
-    
-    cluster_assignments = {}
-    for v in vertices:
-        closest_vertex = min(selected_vertices, key=lambda sv: v.distance_to(sv))
-        cluster_id = selected_vertices.index(closest_vertex)
-        cluster_assignments[v] = cluster_id
-    
-    # Calculate centroids for each cluster
-    centroids = {}
-    for cluster_id in range(num_clusters):
-        cluster_points = [v for v, cid in cluster_assignments.items() if cid == cluster_id]
-        if cluster_points:
-            avg_x = np.mean([v.x for v in cluster_points])
-            avg_y = np.mean([v.y for v in cluster_points])
-            centroids[cluster_id] = Vertex(avg_x, avg_y)
-    
-    return cluster_assignments, centroids
-
-# --- K-Means Clustering Implementation ---
-def kmeans_clustering(vertices, num_clusters):
-    data = prepare_data(vertices)
-    kmeans = KMeans(n_clusters=num_clusters)
-    kmeans.fit(data)
-    cluster_assignments, selected_vertices = assign_results(vertices, kmeans.labels_, kmeans.cluster_centers_)
-    return cluster_assignments, selected_vertices
-
-# --- Hierarchical Clustering Implementation --- 
-def hierarchical_clustering(vertices, num_clusters):
-    data = prepare_data(vertices)
-    agglomerative = AgglomerativeClustering(n_clusters=num_clusters)
-    labels = agglomerative.fit_predict(data)
-    cluster_assignments, selected_vertices = assign_results(vertices, labels)  # Now this computes centroids
-    return cluster_assignments, selected_vertices
-
-# --- Spectral Clustering Implementation --- 
-def spectral_clustering(vertices, num_clusters):
-    data = prepare_data(vertices)
-    spectral = SpectralClustering(n_clusters=num_clusters, affinity='nearest_neighbors')
-    labels = spectral.fit_predict(data)
-    cluster_assignments, selected_vertices = assign_results(vertices, labels)  # Now this computes centroids
-    return cluster_assignments, selected_vertices
-
-# --- Helper Function to Assign Clustering Results ---
-def assign_results(vertices, labels, centers=None):
-    cluster_assignments = {v: labels[i] for i, v in enumerate(vertices)}
-    
-    # Map cluster index to its centroid
-    centroids = {}
-    if centers is not None:
-        for i, center in enumerate(centers):
-            centroids[i] = Vertex(center[0], center[1])  # Convert array to Vertex object
-    else:
-        # Calculate centroids based on cluster assignments (in case of Agglomerative and Spectral)
-        num_clusters = len(set(labels))  # Number of clusters
-        for cluster_id in range(num_clusters):
-            cluster_points = [v for i, v in enumerate(vertices) if labels[i] == cluster_id]
-            if cluster_points:
-                avg_x = np.mean([v.x for v in cluster_points])
-                avg_y = np.mean([v.y for v in cluster_points])
-                centroids[cluster_id] = Vertex(avg_x, avg_y)
-
-    return cluster_assignments, centroids
-
-# --- Main Function to Run Any Clustering Method ---
-def run_clustering(vertices, num_clusters, method='kmeans', show_plot=False, **kwargs):
-    if method == 'kmeans':
-        cluster_assignments, selected_vertices = kmeans_clustering(vertices, num_clusters)
-    elif method == 'hierarchical':
-        cluster_assignments, selected_vertices = hierarchical_clustering(vertices, num_clusters)
-    elif method == 'spectral':
-        cluster_assignments, selected_vertices = spectral_clustering(vertices, num_clusters)
-    elif method == 'greedy':
-        cluster_assignments, selected_vertices = greedy_clustering(vertices, num_clusters)
-    else:
-        raise ValueError(f"Unknown clustering method: {method}")
-
-    if show_plot:
-        plot_clusters(vertices, cluster_assignments, selected_vertices)
-        plt.title(f"{method.capitalize()} Clustering Visualization")
-        plt.xlabel("X-axis")
-        plt.ylabel("Y-axis")
-        plt.xlim(0, 1)
-        plt.ylim(0, 1)
-        plt.grid()
-        plt.savefig("2.png")
-        plt.close()
-
-    return vertices, cluster_assignments, selected_vertices
-
-def group_clusters(cluster_assignments, selected_vertices):
-    # # Create a defaultdict to hold lists of keys for each value
-    # value_to_keys = defaultdict(list)
-
-    # # Iterate through the dictionary items
-    # for key, value in d.items():
-    #     value_to_keys[value].append(key)
-
-    # # Create the result dictionary with value and keys
-    # result = {value: [value] + keys for value, keys in value_to_keys.items()}
-
-    # print(cluster_assignments)
-    # print(selected_vertices)
-
-    result = {}
-    
-    for key, value in cluster_assignments.items():
-        if value not in result:
-            result[value] = []
-        result[value].append(key)
-    
-    # for elem in selected_vertices:
-    #     if elem not in result:
-    #         result[elem] = []
-    #     result[elem].append(elem)
-
-    return result
-
-def run_subTSP(vertices, isCenter, isBold, show_plot):
-    if isCenter:
-        vertices = list(vertices.items())
-    path, min_cost = simulated_annealing_tsp(vertices, isCenter)
-    path += [path[-1]]
-
-    if show_plot:
-        # Now plot the TSP route on top
-        for i in range(len(path)):
-            start = path[i][1] if isCenter else path[i]
-            end = path[(i + 1)%len(path)][1] if isCenter else path[(i + 1)%len(path)]
-            if isBold:
-                plt.plot([start.x, end.x], [start.y, end.y], color='black', linestyle='-', linewidth=2)
-            else:
-                plt.plot([start.x, end.x], [start.y, end.y], color='gray', linestyle='-', linewidth=1)
-    
-    return path
-
-def run_inner_outer(vertices, cluster_assignments, selected_vertices, show_plot, print_log):
-    path_data = []
-
-    if show_plot:
-        plot_clusters(vertices, cluster_assignments, selected_vertices)
-
-    path_data.append(run_subTSP(selected_vertices, True, True, show_plot))
-    if print_log:
-        print('Center... done!')
-
-    clusters = group_clusters(cluster_assignments, selected_vertices)
-
-    for center in path_data[0][:-1]:
-        if print_log:
-            print('Size ', len(clusters[center[0]]), '... ', sep='', end='')
-        path_data.append(run_subTSP(clusters[center[0]], False, False, show_plot))
-        if print_log:
-            print('done!')
-
-    path_data = path_data[1:]
-
-    if show_plot:
-        plt.xlim(0, 1)
-        plt.ylim(0, 1)
-        plt.savefig("3.png")
-        plt.close()
-
-    return path_data
-
-# Function to calculate which edge to delete in the cluster cycle
-def find_edge_to_delete(cycle, prev_center, next_center):
-    min_total_distance = float('inf')
-    edge_to_delete = None
-    swap_order = None
-
-    n = len(cycle)
-    
-    # Loop over all edges in the cycle.
-    for i in range(n):
-        start = cycle[i]
-        end = cycle[(i + 1) % n]
-
-        edge_length = start.distance_to(end)
-        
-        # Case 1: Original order (start -> end)
-        dist_to_prev_center_case1 = start.distance_to(prev_center)
-        dist_to_next_center_case1 = end.distance_to(next_center)
-        total_distance_case1 = dist_to_prev_center_case1 + dist_to_next_center_case1 - edge_length
-        
-        # Case 2: Swapped order (end -> start)
-        dist_to_prev_center_case2 = end.distance_to(prev_center)
-        dist_to_next_center_case2 = start.distance_to(next_center)
-        total_distance_case2 = dist_to_prev_center_case2 + dist_to_next_center_case2 - edge_length
-        
-        # Compare both cases and keep the best (minimum) one
-        if total_distance_case1 < min_total_distance:
-            min_total_distance = total_distance_case1
-            edge_to_delete = i
-            swap_order = False  # Indicates no swap in order
-            
-        if total_distance_case2 < min_total_distance:
-            min_total_distance = total_distance_case2
-            edge_to_delete = (i + 1) % n
-            swap_order = True  # Indicates swap in order
-    
-    return edge_to_delete, swap_order
-
-def run_deleteEdge(path_data):
-    delete_edge = []
-
-    for i in range(len(path_data)):
-        edge_to_delete, swap_order = find_edge_to_delete(path_data[i], path_data[(i-1)%len(path_data)][0], path_data[(i+1)%len(path_data)][0])
-        delete_edge.append((edge_to_delete, swap_order))
-
-    actual_path = []
-
-    for i in range(len(path_data)):
-        path_data[i].pop()
-        
-        if delete_edge[i][1]:
-            # Rotate to the right
-            actual_path += path_data[i][delete_edge[i][0]:] + path_data[i][:delete_edge[i][0]]
-        else:
-            # Rotate to the left
-            actual_path += path_data[i][delete_edge[i][0]::-1] + path_data[i][:delete_edge[i][0]:-1]
-    
-    return actual_path
-
-def plot_final_path(vertices, cluster_assignments, selected_vertices, actual_path, show_plot):
-    if show_plot:
-        plot_clusters(vertices, cluster_assignments, selected_vertices)
-
-        # Now plot the TSP route on top
-        for i in range(len(actual_path)):
-            start = actual_path[i]
-            end = actual_path[(i + 1) % len(actual_path)]
-            plt.plot([start.x, end.x], [start.y, end.y], color='black', linestyle='-', linewidth=2)
-
-        plt.xlim(0, 1)
-        plt.ylim(0, 1)
-            
-        plt.savefig("4.png")
-        plt.close()
-
-    dist_sol = 0
-    for i in range(len(actual_path)):
-        dist_sol += actual_path[i].distance_to(actual_path[(i+1)%len(actual_path)])
-
-    return dist_sol
-
-def compare_solution(vertices, cluster_assignments, selected_vertices, actual_path, optimum, show_plot):
-    if show_plot:
-        plot_clusters(vertices, cluster_assignments, selected_vertices)
-
-        # Now plot the TSP route on top
-        for i in range(len(actual_path)):
-            start = actual_path[i]
-            end = actual_path[(i + 1) % len(actual_path)]
-            plt.plot([start.x, end.x], [start.y, end.y], color='gray', linestyle='--', linewidth=1)
-
-        # Now plot the TSP route on top
-        for i in range(len(optimum)):
-            start = optimum[i]
-            end = optimum[(i + 1) % len(optimum)]
-            plt.plot([start.x, end.x], [start.y, end.y], color='black', linestyle='-', linewidth=2)
-
-        plt.xlim(0, 1)
-        plt.ylim(0, 1)
-            
-        plt.savefig("5.png")
-        plt.close()
-
-    dist_opt = 0
-    for i in range(len(optimum)):
-        dist_opt += optimum[i].distance_to(optimum[(i+1)%len(optimum)])
-    return dist_opt
-
-####################### USE ONLY HERE #######################
-
-def run_simulation(num_vertices, num_clusters, num_test_cases, clustering_method, csv_path = './simulation_results'):
-    data_path, num_clusters = set_parameters(num_vertices, num_clusters)
-    test_cases, optimums = read_data(data_path, num_test_cases)
-
-    with open(f'{csv_path}/{num_vertices}_{num_clusters}_{num_test_cases}_{clustering_method}.csv', 'w') as file:
-        writer = csv.writer(file)
-        writer.writerow(['OPT', 'SOL', 'Rate', 'Time'])
-
-        for i in range(num_test_cases):
-            test_case, optimum = test_cases[i], optimums[i]
-
-            start_time = time.perf_counter()
-
-            vertices, cluster_assignments, selected_vertices = run_clustering(
-                test_case, 
-                num_clusters=num_clusters, 
-                method=clustering_method, 
-                show_plot=True
-            )
-
-            path_data = run_inner_outer(vertices, cluster_assignments, selected_vertices, True, True)
-            actual_path = run_deleteEdge(path_data)
-
-            end_time = time.perf_counter()
-
-            dist_sol = plot_final_path(vertices, cluster_assignments, selected_vertices, actual_path, True)
-            dist_opt = compare_solution(vertices, cluster_assignments, selected_vertices, actual_path, optimum, True)
-
-            writer.writerow([dist_opt, dist_sol, dist_sol/dist_opt, end_time-start_time])
-            print(dist_opt, dist_sol, dist_sol/dist_opt, end_time-start_time)
-            with open(f'{csv_path}/actual_path.txt', 'w') as file2:
-                csv.writer(file2).writerow([actual_path])
-
-if __name__ == '__main__':
-    for num_vertices in [10000]:
-        for num_clusters in [int(num_vertices**0.5)]: # 22=sqrt(1000/2), 32=sqrt(1000)
-            for num_test_cases in [1]:
-                for clustering_method in ['hierarchical']:
-                    run_simulation(num_vertices, num_clusters, num_test_cases, clustering_method, './practice_simulation_results')
-                    print(f'Finished: {num_vertices}, {num_clusters}, {num_test_cases}, {clustering_method}')
-            commands = [
-                # ['git', 'add', 'simulation_results/*'],
-                # ['git', 'commit', '-m', f'auto commit: {num_vertices} vertices, {num_clusters} clusters'],
-                # ['git', 'push']
+    wanted = set(instance_indices)
+    found: dict[int, tuple[list[Vertex], list[int]]] = {}
+    with Path(data_path).open("r", encoding="utf-8") as handle:
+        for line_number, raw in enumerate(handle):
+            if line_number not in wanted:
+                continue
+            tokens = raw.split()
+            marker = tokens.index("output")
+            coordinates = [float(value) for value in tokens[:marker]]
+            vertices = [
+                Vertex(i // 2, coordinates[i], coordinates[i + 1])
+                for i in range(0, len(coordinates), 2)
             ]
-            # Execute each command sequentially
-            for command in commands:
-                result = subprocess.run(command, capture_output=True, text=True)
-                
-                # Check if the command was successful
-                if result.returncode != 0:
-                    print(f"Error executing command: {' '.join(command)}")
-                    print("Error:", result.stderr)
-                else:
-                    print(f"Successfully executed: {' '.join(command)}")
-                    print("Output:", result.stdout)
+            reference = [int(value) - 1 for value in tokens[marker + 1 :]]
+            if len(reference) == len(vertices) + 1 and reference[0] == reference[-1]:
+                reference.pop()
+            validate_tour(reference, len(vertices))
+            found[line_number] = (vertices, reference)
+            if len(found) == len(wanted):
+                break
+    missing = wanted - found.keys()
+    if missing:
+        raise IndexError(f"Instance indices not found: {sorted(missing)}")
+    return [found[index] for index in instance_indices]
 
-############################ END ############################
+
+def distance_matrix(vertices: Sequence[Vertex]) -> np.ndarray:
+    xy = np.asarray([(vertex.x, vertex.y) for vertex in vertices], dtype=float)
+    diff = xy[:, None, :] - xy[None, :, :]
+    return np.sqrt(np.sum(diff * diff, axis=2))
+
+
+def tour_length(route: Sequence[int], distances: np.ndarray) -> float:
+    if len(route) < 2:
+        return 0.0
+    order = np.asarray(route, dtype=int)
+    return float(distances[order, np.roll(order, -1)].sum())
+
+
+def validate_tour(route: Sequence[int], num_vertices: int) -> None:
+    if len(route) != num_vertices or set(route) != set(range(num_vertices)):
+        raise ValueError("Tour must contain every vertex exactly once")
+
+
+def _sample_two_opt_indices(size: int, rng: random.Random) -> tuple[int, int]:
+    while True:
+        i, j = sorted(rng.sample(range(size), 2))
+        if j - i >= 2 and not (i == 0 and j == size - 1):
+            return i, j
+
+
+def _two_opt_delta(route: Sequence[int], distances: np.ndarray, i: int, j: int) -> float:
+    before_i, at_i = route[i - 1], route[i]
+    at_j, after_j = route[j], route[(j + 1) % len(route)]
+    removed = distances[before_i, at_i] + distances[at_j, after_j]
+    added = distances[before_i, at_j] + distances[at_i, after_j]
+    return float(added - removed)
+
+
+def _calibrated_temperature(
+    route: Sequence[int], distances: np.ndarray, rng: random.Random, target_acceptance: float = 0.8
+) -> float:
+    positive_deltas: list[float] = []
+    for _ in range(min(128, 4 * len(route))):
+        i, j = _sample_two_opt_indices(len(route), rng)
+        delta = _two_opt_delta(route, distances, i, j)
+        if delta > 0:
+            positive_deltas.append(delta)
+    if not positive_deltas:
+        nonzero = distances[distances > 0]
+        return float(np.mean(nonzero)) if nonzero.size else 1.0
+    return -float(np.mean(positive_deltas)) / math.log(target_acceptance)
+
+
+def simulated_annealing_tsp(
+    route_vertices: Sequence[int],
+    distances: np.ndarray,
+    iterations: int,
+    seed: int,
+    initial_route: Sequence[int] | None = None,
+) -> tuple[list[int], float]:
+    """Run SA using a fixed proposal budget and O(1) 2-opt cost deltas."""
+    if iterations < 0:
+        raise ValueError("iterations must be non-negative")
+    if len(route_vertices) < 4 or iterations == 0:
+        route = list(initial_route if initial_route is not None else route_vertices)
+        return route, tour_length(route, distances)
+
+    rng = random.Random(seed)
+    if initial_route is None:
+        current = list(route_vertices)
+        rng.shuffle(current)
+    else:
+        current = list(initial_route)
+    current_cost = tour_length(current, distances)
+    best, best_cost = current.copy(), current_cost
+
+    temperature = max(_calibrated_temperature(current, distances, rng), 1e-12)
+    final_temperature = max(temperature * 1e-3, 1e-12)
+    cooling_rate = math.exp(math.log(final_temperature / temperature) / max(iterations, 1))
+
+    for _ in range(iterations):
+        i, j = _sample_two_opt_indices(len(current), rng)
+        delta = _two_opt_delta(current, distances, i, j)
+        if delta <= 0 or rng.random() < math.exp(-delta / temperature):
+            current[i : j + 1] = reversed(current[i : j + 1])
+            current_cost += delta
+            if current_cost < best_cost:
+                best, best_cost = current.copy(), current_cost
+        temperature = max(temperature * cooling_rate, 1e-12)
+    return best, tour_length(best, distances)
+
+
+def _cluster_labels(vertices: Sequence[Vertex], num_clusters: int, method: str, seed: int) -> np.ndarray:
+    data = np.asarray([(vertex.x, vertex.y) for vertex in vertices], dtype=float)
+    if method == "kmeans":
+        return KMeans(n_clusters=num_clusters, n_init=10, random_state=seed).fit_predict(data)
+    if method == "hierarchical":
+        return AgglomerativeClustering(n_clusters=num_clusters).fit_predict(data)
+    if method == "spectral":
+        return SpectralClustering(
+            n_clusters=num_clusters, affinity="nearest_neighbors", random_state=seed
+        ).fit_predict(data)
+    if method == "greedy":
+        rng = random.Random(seed)
+        centers = [rng.randrange(len(vertices))]
+        nearest = np.linalg.norm(data - data[centers[0]], axis=1)
+        while len(centers) < num_clusters:
+            next_center = int(np.argmax(nearest))
+            centers.append(next_center)
+            nearest = np.minimum(nearest, np.linalg.norm(data - data[next_center], axis=1))
+        center_xy = data[centers]
+        return np.argmin(np.linalg.norm(data[:, None, :] - center_xy[None, :, :], axis=2), axis=1)
+    raise ValueError(f"Unknown clustering method: {method}")
+
+
+def _centroids(vertices: Sequence[Vertex], labels: np.ndarray, num_clusters: int) -> np.ndarray:
+    data = np.asarray([(vertex.x, vertex.y) for vertex in vertices], dtype=float)
+    return np.vstack([data[labels == cluster_id].mean(axis=0) for cluster_id in range(num_clusters)])
+
+
+def _open_cluster_cycle(
+    cycle: Sequence[int],
+    prev_centroid: np.ndarray,
+    next_centroid: np.ndarray,
+    vertices: Sequence[Vertex],
+    distances: np.ndarray,
+) -> list[int]:
+    if len(cycle) <= 1:
+        return list(cycle)
+    coordinates = np.asarray([(vertex.x, vertex.y) for vertex in vertices], dtype=float)
+    best_score, best_path = math.inf, None
+    for edge_index in range(len(cycle)):
+        u, v = cycle[edge_index], cycle[(edge_index + 1) % len(cycle)]
+        forward = list(cycle[edge_index + 1 :]) + list(cycle[: edge_index + 1])
+        for candidate in (forward, list(reversed(forward))):
+            score = (
+                np.linalg.norm(coordinates[candidate[0]] - prev_centroid)
+                + np.linalg.norm(coordinates[candidate[-1]] - next_centroid)
+                - distances[u, v]
+            )
+            if score < best_score:
+                best_score, best_path = float(score), candidate
+    assert best_path is not None
+    return best_path
+
+
+def clustered_sa_tsp(
+    vertices: Sequence[Vertex], num_clusters: int, method: str, iterations: int, seed: int,
+    distances: np.ndarray | None = None,
+) -> tuple[list[int], float]:
+    """Cluster-first SA with one shared, explicit total proposal budget."""
+    if not 1 < num_clusters < len(vertices):
+        raise ValueError("num_clusters must be between 2 and n-1")
+    labels = _cluster_labels(vertices, num_clusters, method, seed)
+    centers = _centroids(vertices, labels, num_clusters)
+    center_distances = np.sqrt(np.sum((centers[:, None, :] - centers[None, :, :]) ** 2, axis=2))
+    center_budget = min(max(num_clusters * 10, iterations // 10), iterations)
+    local_budget = iterations - center_budget
+    cluster_order, _ = simulated_annealing_tsp(
+        list(range(num_clusters)), center_distances, center_budget, seed + 1
+    )
+
+    if distances is None:
+        distances = distance_matrix(vertices)
+    cluster_members = {cid: np.flatnonzero(labels == cid).tolist() for cid in range(num_clusters)}
+    cycles: dict[int, list[int]] = {}
+    allocated = 0
+    for position, cid in enumerate(cluster_order):
+        members = cluster_members[cid]
+        if position == len(cluster_order) - 1:
+            budget = local_budget - allocated
+        else:
+            budget = int(local_budget * len(members) / len(vertices))
+            allocated += budget
+        cycles[cid], _ = simulated_annealing_tsp(members, distances, max(budget, 0), seed + 1000 + cid)
+
+    merged: list[int] = []
+    for position, cid in enumerate(cluster_order):
+        prev_center = centers[cluster_order[position - 1]]
+        next_center = centers[cluster_order[(position + 1) % len(cluster_order)]]
+        merged.extend(_open_cluster_cycle(cycles[cid], prev_center, next_center, vertices, distances))
+    validate_tour(merged, len(vertices))
+    return merged, tour_length(merged, distances)
+
+
+def held_karp_length(distances: np.ndarray) -> float:
+    """Exact TSP length for small instances under this exact distance matrix."""
+    n = len(distances)
+    if n > 18:
+        raise ValueError("Held-Karp is intentionally limited to n <= 18")
+    costs = {(1 << k, k): float(distances[0, k]) for k in range(1, n)}
+    for subset_size in range(2, n):
+        next_costs: dict[tuple[int, int], float] = {}
+        for mask in range(1, 1 << (n - 1)):
+            if mask.bit_count() != subset_size:
+                continue
+            actual_mask = mask << 1
+            for last in range(1, n):
+                last_bit = 1 << last
+                if not actual_mask & last_bit:
+                    continue
+                prev_mask = actual_mask ^ last_bit
+                next_costs[(actual_mask, last)] = min(
+                    costs[(prev_mask, prev)] + float(distances[prev, last])
+                    for prev in range(1, n)
+                    if prev_mask & (1 << prev)
+                )
+        costs = next_costs
+    full_mask = ((1 << n) - 1) ^ 1
+    return min(costs[(full_mask, last)] + float(distances[last, 0]) for last in range(1, n))
+
+
+RESULT_FIELDS = [
+    "instance_id", "n", "algorithm", "clustering_method", "num_clusters",
+    "iterations", "seed", "reference_type", "reference_length",
+    "solution_length", "relative_to_reference", "compute_seconds", "valid_tour",
+]
+
+
+def run_experiment(
+    sizes: Iterable[int], instance_seeds: Sequence[int], budgets: Sequence[int],
+    methods: Sequence[str], output_path: str | Path,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for n in sizes:
+        k = max(2, round(math.sqrt(n)))
+        for instance_id, instance_seed in enumerate(instance_seeds):
+            vertices = generate_uniform_instance(n, instance_seed)
+            distances = distance_matrix(vertices)
+            exact = held_karp_length(distances) if n <= 18 else None
+            for budget in budgets:
+                algorithms = [("global_sa", None)] + [("clustered_sa", method) for method in methods]
+                for algorithm, method in algorithms:
+                    run_seed = instance_seed * 100_000 + budget
+                    started = time.perf_counter()
+                    if algorithm == "global_sa":
+                        route, length = simulated_annealing_tsp(list(range(n)), distances, budget, run_seed)
+                    else:
+                        assert method is not None
+                        route, length = clustered_sa_tsp(
+                            vertices, k, method, budget, run_seed, distances=distances
+                        )
+                    elapsed = time.perf_counter() - started
+                    validate_tour(route, n)
+                    rows.append({
+                        "instance_id": instance_id, "n": n, "algorithm": algorithm,
+                        "clustering_method": method or "", "num_clusters": k if method else "",
+                        "iterations": budget, "seed": instance_seed,
+                        "reference_type": "exact_euclidean" if exact is not None else "",
+                        "reference_length": exact if exact is not None else "",
+                        "solution_length": length,
+                        "relative_to_reference": length / exact if exact is not None else "",
+                        "compute_seconds": elapsed, "valid_tour": True,
+                    })
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=RESULT_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    return rows
+
+
+def run_cluster_grid(
+    n: int,
+    instance_seeds: Sequence[int],
+    budget: int,
+    methods: Sequence[str],
+    cluster_counts: Sequence[int],
+    output_path: str | Path,
+) -> list[dict[str, object]]:
+    """Paired replacement for the thesis clustering-method experiment."""
+    rows: list[dict[str, object]] = []
+    for instance_id, instance_seed in enumerate(instance_seeds):
+        vertices = generate_uniform_instance(n, instance_seed)
+        distances = distance_matrix(vertices)
+        exact = held_karp_length(distances) if n <= 18 else None
+        for num_clusters in cluster_counts:
+            for method_index, method in enumerate(methods):
+                run_seed = instance_seed * 100_000 + budget + method_index
+                started = time.perf_counter()
+                route, length = clustered_sa_tsp(
+                    vertices, num_clusters, method, budget, run_seed, distances=distances
+                )
+                elapsed = time.perf_counter() - started
+                validate_tour(route, n)
+                rows.append({
+                    "instance_id": instance_id, "n": n, "algorithm": "clustered_sa",
+                    "clustering_method": method, "num_clusters": num_clusters,
+                    "iterations": budget, "seed": instance_seed,
+                    "reference_type": "exact_euclidean" if exact is not None else "",
+                    "reference_length": exact if exact is not None else "",
+                    "solution_length": length,
+                    "relative_to_reference": length / exact if exact is not None else "",
+                    "compute_seconds": elapsed, "valid_tour": True,
+                })
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=RESULT_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    return rows
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--sizes", type=int, nargs="+", default=[10, 100, 300, 1000])
+    parser.add_argument("--seeds", type=int, nargs="+", default=[101, 202, 303])
+    parser.add_argument("--budgets", type=int, nargs="+", default=[2_000, 8_000, 32_000])
+    parser.add_argument("--methods", nargs="+", choices=["greedy", "kmeans", "hierarchical", "spectral"], default=["hierarchical"])
+    parser.add_argument("--cluster-counts", type=int, nargs="+")
+    parser.add_argument("--output", default="experiment_results_v2/corrected_pilot.csv")
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    if args.cluster_counts:
+        if len(args.sizes) != 1 or len(args.budgets) != 1:
+            raise SystemExit("--cluster-counts requires exactly one --sizes value and one --budgets value")
+        run_cluster_grid(
+            args.sizes[0], args.seeds, args.budgets[0], args.methods,
+            args.cluster_counts, args.output,
+        )
+    else:
+        run_experiment(args.sizes, args.seeds, args.budgets, args.methods, args.output)
